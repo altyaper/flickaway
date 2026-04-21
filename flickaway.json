@@ -5,8 +5,10 @@
     {
       "name": "deals",
       "url": "https://saveyourdeals.com/deals",
-      "type": "change",
-      "notify_title": "saveyourdeals.com has new changes!"
+      "type": "new_content",
+      "selector": "a[href*='/deals/']",
+      "wait_until": "networkidle",
+      "notify_title": "New deal on saveyourdeals.com!"
     }
   ]
 }

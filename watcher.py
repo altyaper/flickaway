@@ -18,7 +18,6 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-# ── SSL context (Bloomberg proxy does SSL inspection) ────────────────────────
 _ssl_ctx = ssl.create_default_context()
 _ssl_ctx.check_hostname = False
 _ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -113,7 +112,10 @@ def animated_sleep(total_seconds: int) -> None:
         line = f"{face} {zzz}  next sniff in {mins:02d}:{secs:02d}~"
         sys.stdout.write(f"\r{line:<{_WIDTH}}")
         sys.stdout.flush()
-        time.sleep(0.35)
+        try:
+            time.sleep(0.35)
+        except KeyboardInterrupt:
+            raise
     sys.stdout.write(f"\r{' ' * _WIDTH}\r")
     sys.stdout.flush()
 
@@ -159,14 +161,14 @@ def save_state(state: dict) -> None:
 
 
 # ── Page fetch ───────────────────────────────────────────────────────────────
-def fetch_content(url: str, selector: str | None, spinner: Spinner) -> str:
+def fetch_content(url: str, selector: str | None, spinner: Spinner, wait_until: str = "domcontentloaded") -> str:
     """Return inner HTML of the first element matching selector, or full body."""
     with sync_playwright() as p:
         spinner.update(f"{_FACE_BOOT} booting browser~")
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         spinner.update(f"{_FACE_SNIFF} fetching {url}~")
-        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        page.goto(url, wait_until=wait_until, timeout=60_000)
         spinner.update(f"{_FACE_READ} reading page~")
         if selector:
             el = page.query_selector(selector)
@@ -247,50 +249,55 @@ def main() -> None:
 
     spinner = Spinner()
 
-    while True:
-        import datetime
-        state = load_state()
+    try:
+        while True:
+            import datetime
+            state = load_state()
 
-        for checker in checkers:
-            name     = checker["name"]
-            url      = checker["url"]
-            kind     = checker["type"]
-            selector = checker.get("selector")
-            title    = checker.get("notify_title", f"{name} changed!")
-            now      = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for checker in checkers:
+                name       = checker["name"]
+                url        = checker["url"]
+                kind       = checker["type"]
+                selector   = checker.get("selector")
+                title      = checker.get("notify_title", f"{name} changed!")
+                wait_until = checker.get("wait_until", "domcontentloaded")
+                now        = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            spinner.start(f"{_FACE_BOOT} [{name}] starting~")
-            try:
-                html = fetch_content(url, selector, spinner)
-            except Exception as exc:
-                spinner.stop(f"[{now}] {_FACE_ERROR} [{name}] fetch failed: {exc}")
-                continue
+                spinner.start(f"{_FACE_BOOT} [{name}] starting~")
+                try:
+                    html = fetch_content(url, selector, spinner, wait_until)
+                except Exception as exc:
+                    spinner.stop(f"[{now}] {_FACE_ERROR} [{name}] fetch failed: {exc}")
+                    continue
 
-            spinner.update(f"{_FACE_CRUNCH} [{name}] crunching~")
+                spinner.update(f"{_FACE_CRUNCH} [{name}] crunching~")
 
-            if kind == "new_content":
-                new_items = check_new_content(name, html, state)
-                if new_items:
-                    labels = [item.split("::")[0] for item in new_items]
-                    body = "New: " + ", ".join(labels)
-                    spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] new! {body}")
-                    send_notification(title, body, url, ntfy_topic)
+                if kind == "new_content":
+                    new_items = check_new_content(name, html, state)
+                    if new_items:
+                        labels = [item.split("::")[0] for item in new_items]
+                        body = "New: " + ", ".join(labels)
+                        spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] new! {body}")
+                        send_notification(title, body, url, ntfy_topic)
+                    else:
+                        spinner.stop(f"[{now}] {_FACE_CALM} [{name}] nothing new~")
+
+                elif kind == "change":
+                    changed = check_change(name, html, state)
+                    if changed:
+                        spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] page changed!")
+                        send_notification(title, "Page content has changed.", url, ntfy_topic)
+                    else:
+                        spinner.stop(f"[{now}] {_FACE_CALM} [{name}] no change~")
+
                 else:
-                    spinner.stop(f"[{now}] {_FACE_CALM} [{name}] nothing new~")
+                    spinner.stop(f"[{now}] {_FACE_ERROR} [{name}] unknown type '{kind}'")
 
-            elif kind == "change":
-                changed = check_change(name, html, state)
-                if changed:
-                    spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] page changed!")
-                    send_notification(title, "Page content has changed.", url, ntfy_topic)
-                else:
-                    spinner.stop(f"[{now}] {_FACE_CALM} [{name}] no change~")
-
-            else:
-                spinner.stop(f"[{now}] {_FACE_ERROR} [{name}] unknown type '{kind}'")
-
-        save_state(state)
-        animated_sleep(interval * 60)
+            save_state(state)
+            animated_sleep(interval * 60)
+    except KeyboardInterrupt:
+        sys.stdout.write(f"\r{' ' * _WIDTH}\r")
+        print("(￣ω￣) bye bye~")
 
 
 if __name__ == "__main__":
