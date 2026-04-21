@@ -1,0 +1,12 @@
+{
+  "interval_minutes": 1,
+  "ntfy_topic": "altyaper-ntfy",
+  "checkers": [
+    {
+      "name": "tiempo-mx",
+      "url": "https://www.tiempo.com.mx",
+      "type": "change",
+      "notify_title": "tiempo.com.mx has new changes!"
+    }
+  ]
+}
