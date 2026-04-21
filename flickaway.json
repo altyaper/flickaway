@@ -1,12 +1,12 @@
 {
   "interval_minutes": 1,
-  "ntfy_topic": "altyaper-ntfy",
+  "ntfy_topic": "altyaper",
   "checkers": [
     {
-      "name": "tiempo-mx",
-      "url": "https://www.tiempo.com.mx",
+      "name": "deals",
+      "url": "https://saveyourdeals.com/deals",
       "type": "change",
-      "notify_title": "tiempo.com.mx has new changes!"
+      "notify_title": "saveyourdeals.com has new changes!"
     }
   ]
 }
