@@ -6,8 +6,8 @@
       "name": "deals",
       "url": "https://saveyourdeals.com/deals",
       "type": "new_content",
-      "selector": "a[href*='/deals/']",
-      "wait_until": "networkidle",
+      "selector": "div.p-3 > a:not([class])",
+      "wait_until": "domcontentloaded",
       "notify_title": "New deal on saveyourdeals.com!"
     }
   ]

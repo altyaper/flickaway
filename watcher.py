@@ -13,6 +13,7 @@ import sys
 import ssl
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -34,7 +35,10 @@ _FACE_CALM    = "(￣▽￣) "
 _FACE_ERROR   = "(；￣Д￣)"
 _SLEEP_FACES  = ["( -ω-)  ", "(-ω-)   ", "(-ω-)   "]
 _ZZZ_FRAMES   = ["z      ", "zZ     ", "zZZ    ", "ZZz    ", "Zzz    ", " zzZ   "]
-_WIDTH = 68
+try:
+    _WIDTH = os.get_terminal_size().columns
+except OSError:
+    _WIDTH = 120
 
 # ── Config / env ─────────────────────────────────────────────────────────────
 STATE_PATH  = Path(os.getenv("WATCHER_STATE", "state.json"))
@@ -84,7 +88,8 @@ class Spinner:
             self._thread.join()
         sys.stdout.write(f"\r{' ' * _WIDTH}\r")
         if final:
-            print(final)
+            line = final[:_WIDTH]
+            sys.stdout.write(f"\r{line:<{_WIDTH}}")
         sys.stdout.flush()
 
     def _spin(self) -> None:
@@ -123,7 +128,8 @@ def animated_sleep(total_seconds: int) -> None:
 # ── Notification ─────────────────────────────────────────────────────────────
 def send_notification(title: str, body: str, url: str, topic: str) -> None:
     if not topic:
-        print(f"  {_FACE_SNIFF} [ntfy] skipped — ntfy_topic not configured~")
+        sys.stdout.write(f"\r  {_FACE_SNIFF} [ntfy] skipped — ntfy_topic not configured~{' ' * 10}")
+        sys.stdout.flush()
         return
     req = urllib.request.Request(
         f"https://ntfy.sh/{topic}",
@@ -137,7 +143,8 @@ def send_notification(title: str, body: str, url: str, topic: str) -> None:
         method="POST",
     )
     _opener.open(req, timeout=10)
-    print(f"  {_FACE_SNIFF} [ntfy] pinged '{NTFY_TOPIC}'! ✨")
+    sys.stdout.write(f"\r  {_FACE_SNIFF} [ntfy] pinged '{NTFY_TOPIC}'! ✨{' ' * 10}")
+    sys.stdout.flush()
 
 
 # ── Config / state I/O ───────────────────────────────────────────────────────
@@ -161,8 +168,39 @@ def save_state(state: dict) -> None:
 
 
 # ── Page fetch ───────────────────────────────────────────────────────────────
-def fetch_content(url: str, selector: str | None, spinner: Spinner, wait_until: str = "domcontentloaded") -> str:
-    """Return inner HTML of the first element matching selector, or full body."""
+def _clean_amazon_url(raw_url: str) -> str:
+    """Strip tracking params (tag, linkCode, linkId, campaignId, ref) from an Amazon URL."""
+    parsed = urllib.parse.urlparse(raw_url)
+    params = urllib.parse.parse_qs(parsed.query)
+    for key in ("tag", "linkCode", "linkId", "campaignId", "ref"):
+        params.pop(key, None)
+    clean_query = urllib.parse.urlencode(params, doseq=True)
+    return urllib.parse.urlunparse(parsed._replace(query=clean_query))
+
+
+def fetch_amazon_url(product_path: str, base_url: str, spinner: Spinner) -> str:
+    """Visit a product page and return the clean Amazon URL from the 'Go to Deal' link."""
+    origin = urllib.parse.urlparse(base_url)
+    product_url = f"{origin.scheme}://{origin.netloc}{product_path}"
+    spinner.update(f"{_FACE_SNIFF} grabbing amazon link~")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(product_url, wait_until="domcontentloaded", timeout=30_000)
+            deal_link = page.query_selector('a:has-text("Go to Deal")')
+            if deal_link:
+                raw = deal_link.get_attribute("href") or ""
+                return _clean_amazon_url(raw)
+        except Exception:
+            pass
+        finally:
+            browser.close()
+    return ""
+
+
+def fetch_content(url: str, selector: str | None, spinner: Spinner, wait_until: str = "domcontentloaded") -> str | list[dict]:
+    """Return full page HTML, or a list of {text, href} dicts when selector targets <a> tags."""
     with sync_playwright() as p:
         spinner.update(f"{_FACE_BOOT} booting browser~")
         browser = p.chromium.launch(headless=True)
@@ -171,49 +209,38 @@ def fetch_content(url: str, selector: str | None, spinner: Spinner, wait_until: 
         page.goto(url, wait_until=wait_until, timeout=60_000)
         spinner.update(f"{_FACE_READ} reading page~")
         if selector:
-            el = page.query_selector(selector)
-            html = el.inner_html() if el else ""
+            elements = page.query_selector_all(selector)
+            results = []
+            for el in elements:
+                text = (el.inner_text() or "").strip()
+                href = el.get_attribute("href") or ""
+                if text:
+                    results.append({"text": text, "href": href})
+            browser.close()
+            return results
         else:
             html = page.content()
-        browser.close()
-    return html
+            browser.close()
+            return html
 
 
 # ── Check logic ───────────────────────────────────────────────────────────────
-def check_new_content(name: str, html: str, state: dict) -> list[str]:
+def check_new_content(name: str, items: list[dict], state: dict) -> list[dict]:
     """
-    Parse all <a> tags from html, return list of new item identifiers
-    (text::href) not seen before. Updates state[name] in place.
+    Compare fetched items against stored state, return list of new item dicts
+    not seen before. Updates state[name] in place.
     """
-    from html.parser import HTMLParser
-
-    class _LinkParser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.links: list[str] = []
-            self._current_href: str = ""
-
-        def handle_starttag(self, tag, attrs):
-            if tag == "a":
-                attrs_dict = dict(attrs)
-                self._current_href = attrs_dict.get("href", "")
-
-        def handle_data(self, data):
-            text = data.strip()
-            if text and self._current_href:
-                self.links.append(f"{text}::{self._current_href}")
-                self._current_href = ""
-
-    parser = _LinkParser()
-    parser.feed(html)
-    current = parser.links
-
     seen: list[str] = state.get(name, [])
     seen_set = set(seen)
-    new_items = [item for item in current if item not in seen_set]
+    new_items = []
+    new_keys = []
+    for item in items:
+        key = f"{item['text']}::{item['href']}"
+        if key not in seen_set:
+            new_items.append(item)
+            new_keys.append(key)
 
-    # Merge: keep seen + add new (preserve order)
-    state[name] = seen + new_items
+    state[name] = seen + new_keys
     return new_items
 
 
@@ -265,7 +292,7 @@ def main() -> None:
 
                 spinner.start(f"{_FACE_BOOT} [{name}] starting~")
                 try:
-                    html = fetch_content(url, selector, spinner, wait_until)
+                    content = fetch_content(url, selector, spinner, wait_until)
                 except Exception as exc:
                     spinner.stop(f"[{now}] {_FACE_ERROR} [{name}] fetch failed: {exc}")
                     continue
@@ -273,16 +300,24 @@ def main() -> None:
                 spinner.update(f"{_FACE_CRUNCH} [{name}] crunching~")
 
                 if kind == "new_content":
-                    new_items = check_new_content(name, html, state)
+                    new_items = check_new_content(name, content, state)
                     if new_items:
-                        labels = [item.split("::")[0] for item in new_items]
-                        body = "New: " + ", ".join(labels)
-                        spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] new! {body}")
-                        send_notification(title, body, url, ntfy_topic)
+                        latest_item = new_items[0]
+                        amazon = fetch_amazon_url(latest_item["href"], url, spinner)
+                        if amazon:
+                            spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] {amazon}")
+                        else:
+                            short_title = latest_item['text'][:100] + "..." if len(latest_item['text']) > 100 else latest_item['text']
+                            spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] new! {short_title}")
+                        body = f"{latest_item['text']}\n{amazon}" if amazon else latest_item["text"]
+                        send_notification(title, body, amazon or url, ntfy_topic)
                     else:
-                        spinner.stop(f"[{now}] {_FACE_CALM} [{name}] nothing new~")
+                        latest = state.get(name, [""])[-1].split("::")[0] if state.get(name) else "?"
+                        short = latest[:100] + "..." if len(latest) > 100 else latest
+                        spinner.stop(f"[{now}] {_FACE_CALM} [{name}] nothing new~ latest: {short}")
 
                 elif kind == "change":
+                    html = content if isinstance(content, str) else json.dumps(content)
                     changed = check_change(name, html, state)
                     if changed:
                         spinner.stop(f"[{now}] {_FACE_ALERT} [{name}] page changed!")
