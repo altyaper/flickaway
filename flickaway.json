@@ -7,7 +7,7 @@
       "url": "https://saveyourdeals.com/deals",
       "type": "new_content",
       "selector": "div.p-3 > a:not([class])",
-      "wait_until": "domcontentloaded",
+      "wait_until": "networkidle",
       "notify_title": "New deal on saveyourdeals.com!"
     }
   ]
